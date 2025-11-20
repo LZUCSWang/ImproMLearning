@@ -103,6 +103,7 @@ public:
 	BYTE* charSegmentImg;
 	int charWidth, charHeight; // 存储字符区域的实际尺寸
 	void CharacterSegmentation(BYTE* plateImg, int width, int height, BYTE* outImg);
+	void RefinePlateBinary(BYTE* mask, int width, int height);
 
 
 	// ======================== 交通标志识别相关 ========================
@@ -198,4 +199,3 @@ public:
 inline CMFCApplication1Doc* CMFCApplication1View::GetDocument() const
    { return reinterpret_cast<CMFCApplication1Doc*>(m_pDocument); }
 #endif
-

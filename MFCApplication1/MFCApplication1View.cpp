@@ -1857,7 +1857,8 @@ void CMFCApplication1View::CharacterSegmentation(BYTE* plateImg, int width, int 
 			{
 				for (int y = 0; y < height; y++)
 				{
-					outImg[y * width + (writeX + x)] = plateImg[y * width + srcX];
+					BYTE v = plateImg[y * width + srcX];
+					outImg[y * width + (writeX + x)] = (v > 0) ? 255 : 0;
 				}
 			}
 		}
@@ -1907,9 +1908,97 @@ void CMFCApplication1View::CharacterSegmentation(BYTE* plateImg, int width, int 
 				int outX = x - centerStart;
 				if (outX < width)
 				{
-					outImg[y * width + outX] = plateImg[y * width + x];
+					BYTE v = plateImg[y * width + x];
+					outImg[y * width + outX] = (v > 0) ? 255 : 0;
 				}
 			}
+		}
+	}
+}
+
+void CMFCApplication1View::RefinePlateBinary(BYTE* mask, int width, int height)
+{
+	if (!mask || width <= 0 || height <= 0)
+		return;
+
+	const int size = width * height;
+	auto zeroBorder = [&](BYTE* img)
+	{
+		if (!img) return;
+		for (int x = 0; x < width; ++x)
+		{
+			img[x] = 0;
+			img[(height - 1) * width + x] = 0;
+		}
+		for (int y = 0; y < height; ++y)
+		{
+			img[y * width] = 0;
+			img[y * width + (width - 1)] = 0;
+		}
+	};
+
+	BYTE* tmp = new BYTE[size];
+	memset(tmp, 0, size);
+
+	// 先做闭运算（膨胀->腐蚀）填补字符断裂
+	dilation(mask, width, height, tmp);
+	zeroBorder(tmp);
+	memset(mask, 0, size);
+	erosion(tmp, width, height, mask);
+	zeroBorder(mask);
+
+	// 再做开运算（腐蚀->膨胀）去掉孤立噪声
+	memset(tmp, 0, size);
+	erosion(mask, width, height, tmp);
+	zeroBorder(tmp);
+	memset(mask, 0, size);
+	dilation(tmp, width, height, mask);
+	zeroBorder(mask);
+
+	delete[] tmp;
+
+	// 强制二值化，确保显示清晰
+	for (int i = 0; i < size; ++i)
+		mask[i] = (mask[i] > 128) ? 255 : 0;
+
+	// 过滤顶部/底部冗余行
+	std::vector<int> rowSum(height, 0);
+	for (int y = 0; y < height; ++y)
+	{
+		int sum = 0;
+		for (int x = 0; x < width; ++x)
+		{
+			if (mask[y * width + x] > 0)
+				sum++;
+		}
+		rowSum[y] = sum;
+	}
+	int minRowPixels = max(2, width / 20); // 至少 5% 的宽度
+	int top = 0;
+	while (top < height && rowSum[top] < minRowPixels)
+		top++;
+	int bottom = height - 1;
+	while (bottom > top && rowSum[bottom] < minRowPixels)
+		bottom--;
+	for (int y = 0; y < top; ++y)
+		memset(mask + y * width, 0, width);
+	for (int y = bottom + 1; y < height; ++y)
+		memset(mask + y * width, 0, width);
+
+	// 过滤极窄的噪声列
+	int minColPixels = max(2, height / 10);
+	for (int x = 0; x < width; ++x)
+	{
+		int sum = 0;
+		for (int y = 0; y < height; ++y)
+		{
+			if (mask[y * width + x] > 0)
+				sum++;
+		}
+		if (sum < minColPixels)
+		{
+			for (int y = 0; y < height; ++y)
+				mask[y * width + x] = 0;
 		}
 	}
 }
@@ -1979,6 +2068,9 @@ void CMFCApplication1View::OnCharacterSegmentation()
 	{
 		plateBinary[i] = (plateGray[i] > threshold) ? 255 : 0;
 	}
+
+	// 5.5) 通过形态学和行列过滤提升字符清晰度
+	RefinePlateBinary(plateBinary, plateWidth, plateHeight);
 
 	// 6) 调用字符分割主功能
 	CharacterSegmentation(
