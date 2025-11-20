@@ -97,6 +97,8 @@ public:
 	BYTE* plateExtractImg;
 	int plateWidth, plateHeight; // 存储车牌的实际尺寸
 	void PlateExtraction(BYTE* segmentImg, int width, int height, BYTE* outImg);
+	int plateGrayFlag;
+	BYTE* plateGrayImg;
 	bool RunColorSegmentation(bool showMessage);
 	bool RunPlateExtraction(bool showMessage);
 	bool RunCharacterSegmentation(bool showMessage);

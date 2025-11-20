@@ -109,6 +109,8 @@ CMFCApplication1View::CMFCApplication1View() noexcept
 	plateExtractImg = 0;
 	plateWidth = 0;
 	plateHeight = 0;
+	plateGrayFlag = 0;
+	plateGrayImg = 0;
 
 	charSegmentFlag = 0;
 	charSegmentImg = 0;
@@ -155,6 +157,8 @@ CMFCApplication1View::~CMFCApplication1View()
 		delete colorSegmentImg;
 	if (plateExtractImg)
 		delete plateExtractImg;
+	if (plateGrayImg)
+		delete plateGrayImg;
 	if (charSegmentImg)
 		delete charSegmentImg;
 
@@ -386,6 +390,21 @@ void CMFCApplication1View::OnDraw(CDC* pDC/*pDC*/)
 		// plateExtractFlag = 0;
 	}
 
+	// 显示车牌灰度图
+	if (plateGrayFlag == 1 && plateGrayImg && plateWidth > 0 && plateHeight > 0)
+	{
+		int startX = 0;
+		int startY = height + plateHeight + 40;
+		for (i = 0; i < plateHeight; i++)
+		{
+			for (j = 0; j < plateWidth; j++)
+			{
+				BYTE gray = plateGrayImg[i * plateWidth + j];
+				pDC->SetPixel(startX + j, startY + i, RGB(gray, gray, gray));
+			}
+		}
+	}
+
 	// 显示字符分割结果（灰度）
 	if (charSegmentFlag == 1 && charSegmentImg && charWidth > 0 && charHeight > 0)
 	{
@@ -471,6 +490,12 @@ void CMFCApplication1View::OnFileOpen()
 	charSegmentFlag = 0;
 	plateWidth = 0;
 	plateHeight = 0;
+	plateGrayFlag = 0;
+	if (plateGrayImg)
+	{
+		delete plateGrayImg;
+		plateGrayImg = 0;
+	}
 	charWidth = 0;
 	charHeight = 0;
 	
@@ -1190,6 +1215,12 @@ void CMFCApplication1View::OnBmp()
 	charSegmentFlag = 0;
 	plateWidth = 0;
 	plateHeight = 0;
+	plateGrayFlag = 0;
+	if (plateGrayImg)
+	{
+		delete plateGrayImg;
+		plateGrayImg = 0;
+	}
 	charWidth = 0;
 	charHeight = 0;
 	
@@ -1661,6 +1692,13 @@ bool CMFCApplication1View::RunPlateExtraction(bool showMessage)
 		return false;
 	}
 
+	plateGrayFlag = 0;
+	if (plateGrayImg)
+	{
+		delete[] plateGrayImg;
+		plateGrayImg = nullptr;
+	}
+
 	int packedSize = plateWidth * plateHeight * 3;
 	BYTE* packed = new BYTE[packedSize];
 	memcpy(packed, plateExtractImg, packedSize);
@@ -1696,11 +1734,10 @@ void CMFCApplication1View::CharacterSegmentation(BYTE* plateImg, int width, int 
 		int maxX;
 		int minY;
 		int maxY;
+		int area;
 	};
 
 	const int size = width * height;
-	const int minCharWidth = max(2, width / 40);
-	const int maxCharWidth = max(minCharWidth + 2, width / 5);
 
 	std::vector<int> columnSum(width, 0);
 	for (int x = 0; x < width; ++x)
@@ -1713,184 +1750,114 @@ void CMFCApplication1View::CharacterSegmentation(BYTE* plateImg, int width, int 
 		}
 		columnSum[x] = sum;
 	}
-	std::vector<int> smooth = columnSum;
-	for (int x = 1; x < width - 1; ++x)
-		smooth[x] = (columnSum[x - 1] + columnSum[x] + columnSum[x + 1]) / 3;
-	int maxCol = 0;
-	for (int v : smooth)
-		maxCol = max(maxCol, v);
 
-	auto refineVertical = [&](CharBox& box)
-	{
-		int top = box.minY;
-		int bottom = box.maxY;
-		bool found = false;
-		for (int y = 0; y < height; ++y)
-		{
-			for (int x = box.minX; x <= box.maxX; ++x)
-			{
-				if (plateImg[y * width + x] > 0)
-				{
-					top = y;
-					found = true;
-					break;
-				}
-			}
-			if (found) break;
-		}
-		found = false;
-		for (int y = height - 1; y >= 0; --y)
-		{
-			for (int x = box.minX; x <= box.maxX; ++x)
-			{
-				if (plateImg[y * width + x] > 0)
-				{
-					bottom = y;
-					found = true;
-					break;
-				}
-			}
-			if (found) break;
-		}
-		if (bottom <= top)
-		{
-			top = 0;
-			bottom = height - 1;
-		}
-		box.minY = top;
-		box.maxY = bottom;
-	};
+	std::vector<int> labels(size, 0);
+	std::vector<int> queue(size, 0);
+	int nextLabel = 1;
+	std::vector<CharBox> allBoxes;
 
-	auto detectByProjection = [&](int threshold)
+	for (int y = 0; y < height; ++y)
 	{
-		std::vector<CharBox> boxes;
-		bool inRegion = false;
-		int start = 0;
-		int zeroRun = 0;
 		for (int x = 0; x < width; ++x)
 		{
-			if (smooth[x] >= threshold)
-			{
-				if (!inRegion)
-				{
-					inRegion = true;
-					start = max(0, x - 1);
-				}
-				zeroRun = 0;
-			}
-			else if (inRegion)
-			{
-				zeroRun++;
-				if (zeroRun >= 2)
-				{
-					int end = x - zeroRun;
-					if (end < start) end = start;
-					boxes.push_back({ start, min(width - 1, end + 1), 0, height - 1 });
-					inRegion = false;
-				}
-			}
-		}
-		if (inRegion)
-			boxes.push_back({ start, width - 1, 0, height - 1 });
+			int idx = y * width + x;
+			if (plateImg[idx] == 0 || labels[idx] != 0)
+				continue;
 
+			CharBox box{ x, x, y, y, 0 };
+			int head = 0, tail = 0;
+			queue[tail++] = idx;
+			labels[idx] = nextLabel;
+
+			while (head < tail)
+			{
+				int cur = queue[head++];
+				int cy = cur / width;
+				int cx = cur % width;
+				box.area++;
+
+				if (cx < box.minX) box.minX = cx;
+				if (cx > box.maxX) box.maxX = cx;
+				if (cy < box.minY) box.minY = cy;
+				if (cy > box.maxY) box.maxY = cy;
+
+				for (int dy = -1; dy <= 1; ++dy)
+				{
+					int ny = cy + dy;
+					if (ny < 0 || ny >= height) continue;
+					for (int dx = -1; dx <= 1; ++dx)
+					{
+						int nx = cx + dx;
+						if (nx < 0 || nx >= width) continue;
+						int nidx = ny * width + nx;
+						if (plateImg[nidx] == 0 || labels[nidx] != 0)
+							continue;
+						labels[nidx] = nextLabel;
+						queue[tail++] = nidx;
+					}
+				}
+			}
+
+			allBoxes.push_back(box);
+			nextLabel++;
+		}
+	}
+
+	auto filterByShape = [&](int minW, int maxW, int minH, int maxH, int minArea, int maxArea, double minAspect, double maxAspect)
+	{
 		std::vector<CharBox> filtered;
-		for (auto box : boxes)
+		for (const auto& box : allBoxes)
 		{
 			int w = box.maxX - box.minX + 1;
-			if (w < minCharWidth)
-				continue;
-			if (w > maxCharWidth * 2)
-			{
-				int pieces = min(5, (w + maxCharWidth - 1) / maxCharWidth);
-				for (int p = 0; p < pieces; ++p)
-				{
-					int sx = box.minX + p * w / pieces;
-					int ex = (p == pieces - 1) ? box.maxX : (box.minX + (p + 1) * w / pieces - 1);
-					if (ex - sx + 1 >= minCharWidth)
-						filtered.push_back({ sx, ex, 0, height - 1 });
-				}
-				continue;
-			}
+			int h = box.maxY - box.minY + 1;
+			if (w < minW || w > maxW) continue;
+			if (h < minH || h > maxH) continue;
+			if (box.area < minArea || box.area > maxArea) continue;
+			double aspect = (double)w / (double)h;
+			if (aspect < minAspect || aspect > maxAspect) continue;
+
 			filtered.push_back(box);
 		}
-		for (auto& box : filtered)
-			refineVertical(box);
 		return filtered;
 	};
 
-	auto detectByComponents = [&]()
+	int minAreaBase = max(40, size / 800);
+	int maxAreaBase = max(200, size / 3);
+	int minHeightBase = max(10, height / 3);
+	int maxHeightBase = height;
+	int minWidthBase = max(2, width / 32);
+	int maxWidthBase = max(minWidthBase + 2, width / 4);
+
+	std::vector<CharBox> regions = filterByShape(
+		minWidthBase, maxWidthBase,
+		minHeightBase, maxHeightBase,
+		minAreaBase, maxAreaBase,
+		0.15, 0.75);
+
+	if (regions.size() < 5)
 	{
-		std::vector<int> labels(size, 0);
-		std::vector<int> queue(size, 0);
-		int nextLabel = 1;
-		std::vector<CharBox> boxes;
-
-		for (int y = 0; y < height; ++y)
-		{
-			for (int x = 0; x < width; ++x)
-			{
-				int idx = y * width + x;
-				if (plateImg[idx] == 0 || labels[idx] != 0)
-					continue;
-
-				CharBox box{ x, x, y, y };
-				int head = 0, tail = 0;
-				queue[tail++] = idx;
-				labels[idx] = nextLabel;
-				int area = 0;
-
-				while (head < tail)
-				{
-					int cur = queue[head++];
-					int cy = cur / width;
-					int cx = cur % width;
-					area++;
-
-					if (cx < box.minX) box.minX = cx;
-					if (cx > box.maxX) box.maxX = cx;
-					if (cy < box.minY) box.minY = cy;
-					if (cy > box.maxY) box.maxY = cy;
-
-					for (int dy = -1; dy <= 1; ++dy)
-					{
-						int ny = cy + dy;
-						if (ny < 0 || ny >= height) continue;
-						for (int dx = -1; dx <= 1; ++dx)
-						{
-							int nx = cx + dx;
-							if (nx < 0 || nx >= width) continue;
-							int nidx = ny * width + nx;
-							if (plateImg[nidx] == 0 || labels[nidx] != 0)
-								continue;
-							labels[nidx] = nextLabel;
-							queue[tail++] = nidx;
-						}
-					}
-				}
-
-				int boxW = box.maxX - box.minX + 1;
-				int boxH = box.maxY - box.minY + 1;
-				if (boxW < minCharWidth || boxH < max(4, height / 4))
-					continue;
-				if (area < (width * height) / 600 || area > (width * height) / 2)
-					continue;
-				boxes.push_back(box);
-				nextLabel++;
-			}
-		}
-		return boxes;
-	};
-
-	std::vector<CharBox> regions;
-	if (maxCol > 0)
-	{
-		int baseThreshold = max(height / 5, maxCol * 4 / 10);
-		regions = detectByProjection(baseThreshold);
-		if (regions.size() < 5)
-			regions = detectByProjection(max(2, baseThreshold / 2));
+		regions = filterByShape(
+			max(1, minWidthBase / 2), max(width / 3, maxWidthBase),
+			max(6, minHeightBase / 2), height,
+			max(20, minAreaBase / 2), maxAreaBase * 2,
+			0.08, 0.9);
 	}
+
 	if (regions.empty())
-		regions = detectByComponents();
+	{
+		int expected = 7;
+		int segmentWidth = max(1, width / expected);
+		for (int i = 0; i < expected; ++i)
+		{
+			int sx = i * segmentWidth;
+			int ex = (i == expected - 1) ? (width - 1) : ((i + 1) * segmentWidth - 1);
+			while (sx < ex && columnSum[sx] == 0) sx++;
+			while (ex > sx && columnSum[ex] == 0) ex--;
+			if (ex <= sx)
+				continue;
+			regions.push_back({ sx, ex, 0, height - 1, 0 });
+		}
+	}
 
 	if (regions.empty())
 	{
@@ -1898,64 +1865,102 @@ void CMFCApplication1View::CharacterSegmentation(BYTE* plateImg, int width, int 
 		return;
 	}
 
+	auto refineBoxVertically = [&](CharBox& box)
+	{
+		int top = box.minY;
+		int bottom = box.maxY;
+		for (int y = box.minY; y <= box.maxY; ++y)
+		{
+			bool hasPixel = false;
+			for (int x = box.minX; x <= box.maxX; ++x)
+			{
+				if (plateImg[y * width + x] > 0)
+				{
+					hasPixel = true;
+					break;
+				}
+			}
+			if (hasPixel)
+			{
+				top = y;
+				break;
+			}
+		}
+		for (int y = box.maxY; y >= box.minY; --y)
+		{
+			bool hasPixel = false;
+			for (int x = box.minX; x <= box.maxX; ++x)
+			{
+				if (plateImg[y * width + x] > 0)
+				{
+					hasPixel = true;
+					break;
+				}
+			}
+			if (hasPixel)
+			{
+				bottom = y;
+				break;
+			}
+		}
+		if (bottom <= top)
+		{
+			top = box.minY;
+			bottom = box.maxY;
+		}
+		box.minY = top;
+		box.maxY = bottom;
+	};
+
+	for (auto& box : regions)
+	{
+		box.minX = max(0, box.minX - 1);
+		box.maxX = min(width - 1, box.maxX + 1);
+		box.minY = max(0, box.minY - 1);
+		box.maxY = min(height - 1, box.maxY + 1);
+		refineBoxVertically(box);
+	}
+
 	std::sort(regions.begin(), regions.end(), [](const CharBox& a, const CharBox& b) {
 		return a.minX < b.minX;
 	});
+
 	if (regions.size() > 8)
 		regions.resize(8);
 
-	int spacing = max(2, width / 120);
-	if (regions.size() == 1)
-		spacing = 0;
-	int availableWidth = width - spacing * (int(regions.size()) - 1);
-	if (availableWidth <= 0)
-	{
-		spacing = 0;
-		availableWidth = width;
-	}
-	int totalSrcWidth = 0;
-	int maxSrcHeight = 0;
-	for (const auto& box : regions)
-	{
-		totalSrcWidth += box.maxX - box.minX + 1;
-		maxSrcHeight = max(maxSrcHeight, box.maxY - box.minY + 1);
-	}
-	if (totalSrcWidth == 0)
-		totalSrcWidth = width;
-	if (maxSrcHeight == 0)
-		maxSrcHeight = height;
+	int spacing = max(2, width / 90);
+	if (regions.size() <= 3)
+		spacing = max(2, width / 120);
 
-	double scaleX = min(1.6, max(0.4, (double)availableWidth / totalSrcWidth));
-	double scaleY = min(1.25, max(0.6, (double)height / maxSrcHeight));
+	int totalWidth = 0;
+	for (size_t i = 0; i < regions.size(); ++i)
+	{
+		totalWidth += regions[i].maxX - regions[i].minX + 1;
+		if (i + 1 < regions.size())
+			totalWidth += spacing;
+	}
+	totalWidth = min(totalWidth, width);
+	int writeX = max(0, (width - totalWidth) / 2);
 
-	int writeX = 0;
 	for (size_t idx = 0; idx < regions.size() && writeX < width; ++idx)
 	{
 		const auto& box = regions[idx];
-		int srcW = box.maxX - box.minX + 1;
-		int srcH = box.maxY - box.minY + 1;
-		int dstW = max(1, int(srcW * scaleX));
-		if (writeX + dstW > width)
-			dstW = width - writeX;
-		int dstH = max(1, int(srcH * scaleY));
-		if (dstH > height)
-			dstH = height;
-		int offsetY = max(0, (height - dstH) / 2);
-		double invX = (double)srcW / max(1, dstW);
-		double invY = (double)srcH / max(1, dstH);
+		int charW = box.maxX - box.minX + 1;
+		int charH = box.maxY - box.minY + 1;
+		int offsetY = max(0, (height - charH) / 2);
 
-		for (int dy = 0; dy < dstH; ++dy)
+		for (int y = 0; y < charH && offsetY + y < height; ++y)
 		{
-			int srcY = box.minY + min(srcH - 1, int(dy * invY));
-			for (int dx = 0; dx < dstW; ++dx)
+			int srcY = box.minY + y;
+			for (int x = 0; x < charW && writeX + x < width; ++x)
 			{
-				int srcX = box.minX + min(srcW - 1, int(dx * invX));
+				int srcX = box.minX + x;
 				BYTE v = plateImg[srcY * width + srcX];
-				outImg[(offsetY + dy) * width + (writeX + dx)] = (v > 0) ? 255 : 0;
+				outImg[(offsetY + y) * width + (writeX + x)] = (v > 0) ? 255 : 0;
 			}
 		}
 
-		writeX += dstW;
+		writeX += charW;
 		if (idx + 1 < regions.size())
 		{
 			for (int g = 0; g < spacing && writeX < width; ++g, ++writeX)
@@ -2000,6 +2005,15 @@ bool CMFCApplication1View::RunCharacterSegmentation(bool showMessage)
 		BYTE b = plateExtractImg[i * 3 + 2];
 		plateGray[i] = (BYTE)(0.299 * r + 0.587 * g + 0.114 * b);
 	}
+
+	if (plateGrayImg)
+	{
+		delete[] plateGrayImg;
+		plateGrayImg = nullptr;
+	}
+	plateGrayImg = new BYTE[width * height];
+	memcpy(plateGrayImg, plateGray, width * height);
+	plateGrayFlag = 1;
 
 	int histogram[256] = { 0 };
 	for (int i = 0; i < width * height; ++i)
