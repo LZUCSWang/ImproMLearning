@@ -1912,6 +1912,51 @@ void CMFCApplication1View::CharacterSegmentation(BYTE* plateImg, int width, int 
 			}
 		}
 	}
+
+	// 最终再二值化一次，避免灰度值导致“模糊”显示
+	int total = width * height;
+	for (int i = 0; i < total; ++i)
+	{
+		outImg[i] = (outImg[i] > 128) ? 255 : 0;
+	}
+}
+
+int CMFCApplication1View::ComputeOtsuThreshold(const int histogram[256], int totalPixels)
+{
+	if (totalPixels <= 0)
+		return 128;
+
+	double sum = 0.0;
+	for (int i = 0; i < 256; ++i)
+		sum += i * histogram[i];
+
+	double sumB = 0.0;
+	int wB = 0;
+	int wF = 0;
+	double varMax = 0.0;
+	int threshold = 0;
+
+	for (int t = 0; t < 256; ++t)
+	{
+		wB += histogram[t];
+		if (wB == 0)
+			continue;
+		wF = totalPixels - wB;
+		if (wF == 0)
+			break;
+
+		sumB += t * histogram[t];
+		double mB = sumB / wB;
+		double mF = (sum - sumB) / wF;
+		double betweenVar = (double)wB * wF * (mB - mF) * (mB - mF);
+
+		if (betweenVar > varMax)
+		{
+			varMax = betweenVar;
+			threshold = t;
+		}
+	}
+	return threshold;
 }
 
 void CMFCApplication1View::OnCharacterSegmentation()
@@ -1956,29 +2001,31 @@ void CMFCApplication1View::OnCharacterSegmentation()
 	// 5) 对灰度图进行二值化预处理，提高字符分割效果
 	BYTE* plateBinary = new BYTE[plateWidth * plateHeight];
 	int threshold = 128; // 初始阈值
-	// 自动计算阈值（Otsu's方法简化版）
+	// 自动计算阈值（Otsu's方法）
 	int histogram[256] = {0};
 	for (int i = 0; i < plateWidth * plateHeight; i++)
 	{
 		histogram[plateGray[i]]++;
 	}
-	// 简单计算中间值作为阈值
-	int totalPixels = plateWidth * plateHeight;
-	int sumPixels = 0;
-	for (int i = 0; i < 256; i++)
-	{
-		sumPixels += histogram[i];
-		if (sumPixels > totalPixels / 2)
-		{
-			threshold = i;
-			break;
-		}
-	}
+	threshold = ComputeOtsuThreshold(histogram, plateWidth * plateHeight);
 	// 二值化
 	for (int i = 0; i < plateWidth * plateHeight; i++)
 	{
 		plateBinary[i] = (plateGray[i] > threshold) ? 255 : 0;
 	}
+
+	// 5.5) 轻量形态学处理：闭运算填补断笔 + 开运算去孤立噪声
+	BYTE* tmpMorph = new BYTE[plateWidth * plateHeight];
+	memset(tmpMorph, 0, plateWidth * plateHeight);
+	dilation(plateBinary, plateWidth, plateHeight, tmpMorph);
+	erosion(tmpMorph, plateWidth, plateHeight, plateBinary);
+	erosion(plateBinary, plateWidth, plateHeight, tmpMorph);
+	dilation(tmpMorph, plateWidth, plateHeight, plateBinary);
+	delete[] tmpMorph;
+
+	// 再次二值化，保证只有0/255
+	for (int i = 0; i < plateWidth * plateHeight; ++i)
+		plateBinary[i] = (plateBinary[i] > 128) ? 255 : 0;
 
 	// 6) 调用字符分割主功能
 	CharacterSegmentation(
