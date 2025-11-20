@@ -97,12 +97,16 @@ public:
 	BYTE* plateExtractImg;
 	int plateWidth, plateHeight; // 存储车牌的实际尺寸
 	void PlateExtraction(BYTE* segmentImg, int width, int height, BYTE* outImg);
+	bool RunColorSegmentation(bool showMessage);
+	bool RunPlateExtraction(bool showMessage);
+	bool RunCharacterSegmentation(bool showMessage);
 
 	//字符分割
 	int charSegmentFlag;
 	BYTE* charSegmentImg;
 	int charWidth, charHeight; // 存储字符区域的实际尺寸
 	void CharacterSegmentation(BYTE* plateImg, int width, int height, BYTE* outImg);
+	int ComputeOtsuThreshold(const int histogram[256], int totalPixels);
 
 
 	// ======================== 交通标志识别相关 ========================
@@ -192,10 +196,10 @@ public:
 	afx_msg void OnRedSegmentation();       // 红色分割菜单响应
 	afx_msg void OnConnectedFill();         // 连通填充菜单响应
 	afx_msg void OnShapeDetection();        // 形状检测菜单响应
+	afx_msg void OnAutoRecognize();
 };
 
 #ifndef _DEBUG  // MFCApplication1View.cpp 中的调试版本
 inline CMFCApplication1Doc* CMFCApplication1View::GetDocument() const
    { return reinterpret_cast<CMFCApplication1Doc*>(m_pDocument); }
 #endif
-

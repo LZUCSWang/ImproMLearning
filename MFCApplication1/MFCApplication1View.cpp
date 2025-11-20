@@ -52,6 +52,7 @@ BEGIN_MESSAGE_MAP(CMFCApplication1View, CView)
 	ON_COMMAND(ID_32782, &CMFCApplication1View::OnColorSegmentation)
 	ON_COMMAND(ID_32783, &CMFCApplication1View::OnPlateExtraction)
 	ON_COMMAND(ID_32784, &CMFCApplication1View::OnCharacterSegmentation)
+	ON_COMMAND(ID_32790, &CMFCApplication1View::OnAutoRecognize)
 	// 交通标志识别相关命令
 	ON_COMMAND(ID_32787, &CMFCApplication1View::OnBlueSegmentation)
 	ON_COMMAND(ID_32788, &CMFCApplication1View::OnRedSegmentation)
@@ -1390,40 +1391,43 @@ void CMFCApplication1View::ColorSegmentation(BYTE* rgbImg, int width, int height
 
 }
 
-void CMFCApplication1View::OnColorSegmentation()
+bool CMFCApplication1View::RunColorSegmentation(bool showMessage)
 {
-	// ============ 请在此实现颜色分割菜单响应功能 ============
-	// 功能说明：检查是否已加载图像，调用ColorSegmentation函数处理，更新显示
-	// 检查是否有彩色图像数据（程序中 bmpflag==1 时会填充 rgbimg）
 	if (bmpflag != 1 || rgbimg == 0 || width <= 0 || height <= 0)
 	{
 		AfxMessageBox(_T("请先打开一幅彩色 BMP 图像 (bmpflag==1)。"));
-		return;
+		return false;
 	}
 
-	// 释放旧的分割结果（如果存在）
 	if (colorSegmentImg)
 	{
 		delete[] colorSegmentImg;
 		colorSegmentImg = 0;
 	}
 
-	// 分配输出二值图像缓冲区（每像素一个字节，0 or 255）
 	colorSegmentImg = new BYTE[width * height];
+	if (!colorSegmentImg)
+	{
+		AfxMessageBox(_T("颜色分割内存分配失败。"));
+		return false;
+	}
 	memset(colorSegmentImg, 0, width * height);
 
-	// 有些 bmp 的 rgbimg 存储为 B G R 顺序，ColorSegmentation 期望 R G B。
-	// 因此先把 rgbimg 转成标准的 R G B 缓冲区（连续 3*width*height，RGB 顺序）。
 	BYTE* tmpRGB = new BYTE[3 * width * height];
+	if (!tmpRGB)
+	{
+		delete[] colorSegmentImg;
+		colorSegmentImg = nullptr;
+		AfxMessageBox(_T("临时缓冲区分配失败。"));
+		return false;
+	}
 	for (int y = 0; y < height; y++)
 	{
 		for (int x = 0; x < width; x++)
 		{
-			// 源数组在读取 bmp 时是按行存放，索引为 i*3*width + j (j 为 0,1,2,3...)
 			int srcIdx = y * 3 * width + x * 3;
 			int dstIdx = (y * width + x) * 3;
 
-			// 源：B G R  -> 目标：R G B
 			BYTE b = rgbimg[srcIdx + 0];
 			BYTE g = rgbimg[srcIdx + 1];
 			BYTE r = rgbimg[srcIdx + 2];
@@ -1434,13 +1438,9 @@ void CMFCApplication1View::OnColorSegmentation()
 		}
 	}
 
-	// 调用颜色分割函数（将会在 colorSegmentImg 中写入 0/255 二值掩膜）
 	ColorSegmentation(tmpRGB, width, height, colorSegmentImg);
-
-	// 释放临时 RGB 缓冲区
 	delete[] tmpRGB;
 
-	// 设置标志以便 OnDraw 显示分割结果，并刷新窗口
 	colorSegmentFlag = 1;
 
 	OnInitialUpdate();
@@ -1448,8 +1448,14 @@ void CMFCApplication1View::OnColorSegmentation()
 	GetClientRect(&ClientRect);
 	InvalidateRect(&ClientRect);
 
-	AfxMessageBox(_T("颜色分割完成。"));
-	
+	if (showMessage)
+		AfxMessageBox(_T("颜色分割完成。"));
+	return true;
+}
+
+void CMFCApplication1View::OnColorSegmentation()
+{
+	RunColorSegmentation(true);
 }
 
 // 车牌提取 - 定位和提取车牌区域
@@ -1619,38 +1625,31 @@ void CMFCApplication1View::PlateExtraction(BYTE* segmentImg, int width, int heig
 
 }
 
-void CMFCApplication1View::OnPlateExtraction()
+bool CMFCApplication1View::RunPlateExtraction(bool showMessage)
 {
-	// ============ 请在此实现车牌提取菜单响应功能 ============
-	// 功能说明：检查是否已完成颜色分割，调用PlateExtraction函数处理，更新显示
-	// 1) 检查是否已有颜色分割结果
 	if (colorSegmentImg == 0 || width <= 0 || height <= 0)
 	{
 		AfxMessageBox(_T("请先进行颜色分割！"));
-		return;
+		return false;
 	}
 
-	// 2) 删除旧结果
 	if (plateExtractImg)
 	{
 		delete[] plateExtractImg;
 		plateExtractImg = 0;
 	}
 
-	// 3) 分配 RGB 缓冲区（与原图一样大）
 	int imgSize = width * height * 3;
 	plateExtractImg = new BYTE[imgSize];
 	if (!plateExtractImg)
 	{
-		AfxMessageBox(_T("内存分配失败！"));
-		return;
+		AfxMessageBox(_T("车牌提取内存分配失败！"));
+		return false;
 	}
 	memset(plateExtractImg, 0, imgSize);
 
-	// 4) 调用车牌提取函数
 	PlateExtraction(colorSegmentImg, width, height, plateExtractImg);
 
-	// 5) 判断是否检测到车牌
 	if (plateExtractFlag == 0 || plateWidth <= 0 || plateHeight <= 0)
 	{
 		delete[] plateExtractImg;
@@ -1659,293 +1658,342 @@ void CMFCApplication1View::OnPlateExtraction()
 		plateHeight = 0;
 
 		AfxMessageBox(_T("未检测到车牌区域，请调整参数或检查颜色分割效果。"));
-		return;
+		return false;
 	}
 
-	// 6) 缩减缓冲区只保留车牌尺寸，避免后续处理读取无效数据
 	int packedSize = plateWidth * plateHeight * 3;
 	BYTE* packed = new BYTE[packedSize];
 	memcpy(packed, plateExtractImg, packedSize);
 	delete[] plateExtractImg;
 	plateExtractImg = packed;
 
-	// 8) 刷新显示
 	OnInitialUpdate();
 	CRect rc;
 	GetClientRect(&rc);
 	InvalidateRect(&rc);
 
-	AfxMessageBox(_T("车牌提取完成。"));
-	
-	
-	
+	if (showMessage)
+		AfxMessageBox(_T("车牌提取完成。"));
+	return true;
 }
 
-// 字符分割 - 提取蓝底白字的车牌字符
+void CMFCApplication1View::OnPlateExtraction()
+{
+	RunPlateExtraction(true);
+}
+
+// 字符分割 - 投影与连通域结合的清晰化输出
 void CMFCApplication1View::CharacterSegmentation(BYTE* plateImg, int width, int height, BYTE* outImg)
 {
-	// ============ 优化后的字符分割功能 ============
-	// 功能说明：对车牌图像进行垂直投影分析，分割出单个字符，
-	//          每个字符用黑色背景间隔显示，便于后续字符识别
-	// 清空输出
+	if (!plateImg || !outImg || width <= 0 || height <= 0)
+		return;
+
 	memset(outImg, 0, width * height);
 
-	// 计算垂直投影
-	std::vector<int> projection(width, 0);
-	int maxProjection = 0;
-	int sumProjection = 0;
-	for (int x = 0; x < width; x++)
+	struct CharBox
+	{
+		int minX;
+		int maxX;
+		int minY;
+		int maxY;
+	};
+
+	const int size = width * height;
+	const int minCharWidth = max(2, width / 40);
+	const int maxCharWidth = max(minCharWidth + 2, width / 5);
+
+	std::vector<int> columnSum(width, 0);
+	for (int x = 0; x < width; ++x)
 	{
 		int sum = 0;
-		for (int y = 0; y < height; y++)
+		for (int y = 0; y < height; ++y)
 		{
-			if (plateImg[y * width + x] > 128)  // 白色像素计数
+			if (plateImg[y * width + x] > 0)
 				sum++;
 		}
-		projection[x] = sum;
-		if (sum > maxProjection)
-			maxProjection = sum;
-		sumProjection += sum;
+		columnSum[x] = sum;
 	}
+	std::vector<int> smooth = columnSum;
+	for (int x = 1; x < width - 1; ++x)
+		smooth[x] = (columnSum[x - 1] + columnSum[x] + columnSum[x + 1]) / 3;
+	int maxCol = 0;
+	for (int v : smooth)
+		maxCol = max(maxCol, v);
 
-	// 自适应阈值计算 - 更加准确地确定字符区域
-	int threshold;
-	// 如果最大投影值较大，使用相对阈值
-	if (maxProjection > height / 4)
+	auto refineVertical = [&](CharBox& box)
 	{
-		threshold = max(maxProjection / 4, height / 10); // 使用最大值的1/4或高度的1/10
-	}
-	else
-	{
-		// 否则使用较低的阈值，避免漏检
-		threshold = max(height / 12, 3); // 至少3个像素
-	}
-	
-	// 平滑投影曲线，减少噪声影响
-	std::vector<int> smoothedProjection = projection;
-	for (int x = 1; x < width - 1; x++)
-	{
-		smoothedProjection[x] = (projection[x-1] + projection[x] + projection[x+1]) / 3;
-	}
-
-	// 开始扫描字符区域
-	std::vector<std::pair<int, int>> regions;  // (start, end)
-	bool inRegion = false;
-	int startX = 0;
-
-	for (int x = 0; x < width; x++)
-	{
-		if (!inRegion && smoothedProjection[x] > threshold)
+		int top = box.minY;
+		int bottom = box.maxY;
+		bool found = false;
+		for (int y = 0; y < height; ++y)
 		{
-			inRegion = true;
-			startX = x;
-		}
-		else if (inRegion)
-		{
-			// 改进：允许中间有短暂的低投影值，避免字符被分割
-			bool isRegionEnd = true;
-			// 检查接下来的几个像素是否仍有字符
-			int checkLength = min(3, width - x - 1);
-			for (int i = 0; i <= checkLength; i++)
+			for (int x = box.minX; x <= box.maxX; ++x)
 			{
-				if (x + i < width && smoothedProjection[x + i] > threshold / 2)
+				if (plateImg[y * width + x] > 0)
 				{
-					isRegionEnd = false;
+					top = y;
+					found = true;
 					break;
 				}
 			}
-			
-			if (isRegionEnd || x == width - 1)
-			{
-				inRegion = false;
-				int endX = (x == width - 1) ? x : x - 1;
-				regions.push_back(std::make_pair(startX, endX));
-			}
+			if (found) break;
 		}
-	}
-
-	if (regions.empty())
-	{
-		// 如果没有检测到字符，尝试使用更低的阈值重新检测
-		threshold = max(height / 15, 2);
-		regions.clear();
-		inRegion = false;
-		for (int x = 0; x < width; x++)
+		found = false;
+		for (int y = height - 1; y >= 0; --y)
 		{
-			if (!inRegion && projection[x] > threshold)
+			for (int x = box.minX; x <= box.maxX; ++x)
 			{
-				inRegion = true;
-				startX = x;
+				if (plateImg[y * width + x] > 0)
+				{
+					bottom = y;
+					found = true;
+					break;
+				}
 			}
-			else if (inRegion && projection[x] <= threshold)
+			if (found) break;
+		}
+		if (bottom <= top)
+		{
+			top = 0;
+			bottom = height - 1;
+		}
+		box.minY = top;
+		box.maxY = bottom;
+	};
+
+	auto detectByProjection = [&](int threshold)
+	{
+		std::vector<CharBox> boxes;
+		bool inRegion = false;
+		int start = 0;
+		int zeroRun = 0;
+		for (int x = 0; x < width; ++x)
+		{
+			if (smooth[x] >= threshold)
 			{
-				inRegion = false;
-				regions.push_back(std::make_pair(startX, x - 1));
+				if (!inRegion)
+				{
+					inRegion = true;
+					start = max(0, x - 1);
+				}
+				zeroRun = 0;
+			}
+			else if (inRegion)
+			{
+				zeroRun++;
+				if (zeroRun >= 2)
+				{
+					int end = x - zeroRun;
+					if (end < start) end = start;
+					boxes.push_back({ start, min(width - 1, end + 1), 0, height - 1 });
+					inRegion = false;
+				}
 			}
 		}
 		if (inRegion)
-		{
-			regions.push_back(std::make_pair(startX, width - 1));
-		}
-	}
+			boxes.push_back({ start, width - 1, 0, height - 1 });
 
-	// 过滤小区域噪声
-	std::vector<std::pair<int, int>> validRegions;
-	for (const auto& region : regions)
-	{
-		int charW = region.second - region.first + 1;
-		// 根据车牌字符特点，过滤过窄或过宽的区域
-		if (charW >= 3 && charW < width / 3) // 宽度至少3像素，不超过图像1/3
+		std::vector<CharBox> filtered;
+		for (auto box : boxes)
 		{
-			validRegions.push_back(region);
-		}
-	}
-
-	// 如果有效区域过少，可能是阈值问题，尝试恢复一些被过滤的区域
-	if (validRegions.size() < 4) // 车牌至少应有4个字符
-	{
-		for (const auto& region : regions)
-		{
-			bool alreadyAdded = false;
-			for (const auto& valid : validRegions)
+			int w = box.maxX - box.minX + 1;
+			if (w < minCharWidth)
+				continue;
+			if (w > maxCharWidth * 2)
 			{
-				if (region.first == valid.first && region.second == valid.second)
+				int pieces = min(5, (w + maxCharWidth - 1) / maxCharWidth);
+				for (int p = 0; p < pieces; ++p)
 				{
-					alreadyAdded = true;
-					break;
+					int sx = box.minX + p * w / pieces;
+					int ex = (p == pieces - 1) ? box.maxX : (box.minX + (p + 1) * w / pieces - 1);
+					if (ex - sx + 1 >= minCharWidth)
+						filtered.push_back({ sx, ex, 0, height - 1 });
 				}
+				continue;
 			}
-			if (!alreadyAdded && (region.second - region.first + 1) >= 2)
-			{
-				validRegions.push_back(region);
-			}
+			filtered.push_back(box);
 		}
-	}
+		for (auto& box : filtered)
+			refineVertical(box);
+		return filtered;
+	};
 
-	// 将有效区域按x坐标排序
-	std::sort(validRegions.begin(), validRegions.end());
-
-	if (validRegions.empty())
+	auto detectByComponents = [&]()
 	{
-		// 最后尝试：如果还是没有检测到字符，直接使用整个图像作为一个区域
-		// 这样至少能显示一些内容，方便调试
-		validRegions.push_back(std::make_pair(0, width - 1));
-	}
+		std::vector<int> labels(size, 0);
+		std::vector<int> queue(size, 0);
+		int nextLabel = 1;
+		std::vector<CharBox> boxes;
 
-	// 将切割出的字符绘制到 outImg
-	int writeX = 0; // 写入位置
-	int maxCharWidth = (width - (validRegions.size() - 1) * 2) / validRegions.size();
-
-	for (size_t k = 0; k < validRegions.size(); k++)
-	{
-		int sx = validRegions[k].first;
-		int ex = validRegions[k].second;
-
-		int charW = ex - sx + 1;
-		// 限制字符宽度，避免单个字符占用过多空间
-		if (charW > maxCharWidth)
+		for (int y = 0; y < height; ++y)
 		{
-			charW = maxCharWidth;
-			sx = (validRegions[k].first + validRegions[k].second - charW + 1) / 2; // 居中裁剪
-		}
-
-		// 将字符拷贝到输出
-		for (int x = 0; x < charW && (writeX + x < width); x++)
-		{
-			int srcX = sx + x;
-			if (srcX < width)
+			for (int x = 0; x < width; ++x)
 			{
-				for (int y = 0; y < height; y++)
+				int idx = y * width + x;
+				if (plateImg[idx] == 0 || labels[idx] != 0)
+					continue;
+
+				CharBox box{ x, x, y, y };
+				int head = 0, tail = 0;
+				queue[tail++] = idx;
+				labels[idx] = nextLabel;
+				int area = 0;
+
+				while (head < tail)
 				{
-					outImg[y * width + (writeX + x)] = plateImg[y * width + srcX];
+					int cur = queue[head++];
+					int cy = cur / width;
+					int cx = cur % width;
+					area++;
+
+					if (cx < box.minX) box.minX = cx;
+					if (cx > box.maxX) box.maxX = cx;
+					if (cy < box.minY) box.minY = cy;
+					if (cy > box.maxY) box.maxY = cy;
+
+					for (int dy = -1; dy <= 1; ++dy)
+					{
+						int ny = cy + dy;
+						if (ny < 0 || ny >= height) continue;
+						for (int dx = -1; dx <= 1; ++dx)
+						{
+							int nx = cx + dx;
+							if (nx < 0 || nx >= width) continue;
+							int nidx = ny * width + nx;
+							if (plateImg[nidx] == 0 || labels[nidx] != 0)
+								continue;
+							labels[nidx] = nextLabel;
+							queue[tail++] = nidx;
+						}
+					}
 				}
+
+				int boxW = box.maxX - box.minX + 1;
+				int boxH = box.maxY - box.minY + 1;
+				if (boxW < minCharWidth || boxH < max(4, height / 4))
+					continue;
+				if (area < (width * height) / 600 || area > (width * height) / 2)
+					continue;
+				boxes.push_back(box);
+				nextLabel++;
+			}
+		}
+		return boxes;
+	};
+
+	std::vector<CharBox> regions;
+	if (maxCol > 0)
+	{
+		int baseThreshold = max(height / 5, maxCol * 4 / 10);
+		regions = detectByProjection(baseThreshold);
+		if (regions.size() < 5)
+			regions = detectByProjection(max(2, baseThreshold / 2));
+	}
+	if (regions.empty())
+		regions = detectByComponents();
+
+	if (regions.empty())
+	{
+		memcpy(outImg, plateImg, width * height);
+		return;
+	}
+
+	std::sort(regions.begin(), regions.end(), [](const CharBox& a, const CharBox& b) {
+		return a.minX < b.minX;
+	});
+	if (regions.size() > 8)
+		regions.resize(8);
+
+	int spacing = max(2, width / 120);
+	if (regions.size() == 1)
+		spacing = 0;
+	int availableWidth = width - spacing * (int(regions.size()) - 1);
+	if (availableWidth <= 0)
+	{
+		spacing = 0;
+		availableWidth = width;
+	}
+	int totalSrcWidth = 0;
+	int maxSrcHeight = 0;
+	for (const auto& box : regions)
+	{
+		totalSrcWidth += box.maxX - box.minX + 1;
+		maxSrcHeight = max(maxSrcHeight, box.maxY - box.minY + 1);
+	}
+	if (totalSrcWidth == 0)
+		totalSrcWidth = width;
+	if (maxSrcHeight == 0)
+		maxSrcHeight = height;
+
+	double scaleX = min(1.6, max(0.4, (double)availableWidth / totalSrcWidth));
+	double scaleY = min(1.25, max(0.6, (double)height / maxSrcHeight));
+
+	int writeX = 0;
+	for (size_t idx = 0; idx < regions.size() && writeX < width; ++idx)
+	{
+		const auto& box = regions[idx];
+		int srcW = box.maxX - box.minX + 1;
+		int srcH = box.maxY - box.minY + 1;
+		int dstW = max(1, int(srcW * scaleX));
+		if (writeX + dstW > width)
+			dstW = width - writeX;
+		int dstH = max(1, int(srcH * scaleY));
+		if (dstH > height)
+			dstH = height;
+		int offsetY = max(0, (height - dstH) / 2);
+		double invX = (double)srcW / max(1, dstW);
+		double invY = (double)srcH / max(1, dstH);
+
+		for (int dy = 0; dy < dstH; ++dy)
+		{
+			int srcY = box.minY + min(srcH - 1, int(dy * invY));
+			for (int dx = 0; dx < dstW; ++dx)
+			{
+				int srcX = box.minX + min(srcW - 1, int(dx * invX));
+				BYTE v = plateImg[srcY * width + srcX];
+				outImg[(offsetY + dy) * width + (writeX + dx)] = (v > 0) ? 255 : 0;
 			}
 		}
 
-		writeX += charW;
+		writeX += dstW;
+		if (idx + 1 < regions.size())
+		{
+			for (int g = 0; g < spacing && writeX < width; ++g, ++writeX)
+			{
+				for (int y = 0; y < height; ++y)
+					outImg[y * width + writeX] = 0;
+			}
+		}
+	}
 
-		// 字符间留2-3像素黑间隔
-		int gapWidth = 2;
-		if (writeX + gapWidth < width && k < validRegions.size() - 1)
-		{
-			// 填充间隔为黑色
-			for (int x = 0; x < gapWidth && (writeX + x < width); x++)
-			{
-				for (int y = 0; y < height; y++)
-				{
-					outImg[y * width + (writeX + x)] = 0;
-				}
-			}
-			writeX += gapWidth;
-		}
-		else
-		{
-			break;
-		}
-	}
-	
-	// 如果outImg仍然全黑，手动复制原始图像的一部分，确保有输出
-	bool hasContent = false;
-	for (int i = 0; i < width * height && !hasContent; i++)
+	for (int y = 0; y < height; ++y)
 	{
-		if (outImg[i] > 0)
-		{
-			hasContent = true;
-			break;
-		}
-	}
-	
-	if (!hasContent)
-	{
-		// 复制原始图像的中心部分
-		int centerStart = (width - width / 2) / 2;
-		int centerEnd = centerStart + width / 2;
-		for (int x = centerStart; x < centerEnd && x < width; x++)
-		{
-			for (int y = 0; y < height; y++)
-			{
-				int outX = x - centerStart;
-				if (outX < width)
-				{
-					outImg[y * width + outX] = plateImg[y * width + x];
-				}
-			}
-		}
+		for (int x = writeX; x < width; ++x)
+			outImg[y * width + x] = 0;
 	}
 }
 
-void CMFCApplication1View::OnCharacterSegmentation()
+bool CMFCApplication1View::RunCharacterSegmentation(bool showMessage)
 {
-	// ============ 请在此实现字符分割菜单响应功能 ============
-	// 功能说明：检查是否已提取车牌，调用CharacterSegmentation函数处理，更新显示
-	// 1) 检查是否已经完成车牌提取
 	if (plateExtractFlag == 0 ||
 		plateExtractImg == nullptr ||
 		plateWidth <= 0 || plateHeight <= 0)
 	{
 		AfxMessageBox(_T("请先提取车牌！"));
-		return;
+		return false;
 	}
 
-	// 2) 删除旧的字符分割结果
 	if (charSegmentImg)
 	{
 		delete[] charSegmentImg;
 		charSegmentImg = nullptr;
 	}
 
-	// 3) 分配输出图内存（保持与车牌区域大小一致）
-	charSegmentImg = new BYTE[plateWidth * plateHeight];
-	if (!charSegmentImg)
-	{
-		AfxMessageBox(_T("字符分割内存分配失败！"));
-		return;
-	}
-	memset(charSegmentImg, 0, plateWidth * plateHeight);
+	int width = plateWidth;
+	int height = plateHeight;
 
-	// 4) 将 plateExtractImg 的 RGB 转成灰度，用于 CharacterSegmentation
-	BYTE* plateGray = new BYTE[plateWidth * plateHeight];
-	for (int i = 0; i < plateWidth * plateHeight; i++)
+	BYTE* plateGray = new BYTE[width * height];
+	for (int i = 0; i < width * height; ++i)
 	{
 		BYTE r = plateExtractImg[i * 3 + 0];
 		BYTE g = plateExtractImg[i * 3 + 1];
@@ -1953,56 +2001,95 @@ void CMFCApplication1View::OnCharacterSegmentation()
 		plateGray[i] = (BYTE)(0.299 * r + 0.587 * g + 0.114 * b);
 	}
 
-	// 5) 对灰度图进行二值化预处理，提高字符分割效果
-	BYTE* plateBinary = new BYTE[plateWidth * plateHeight];
-	int threshold = 128; // 初始阈值
-	// 自动计算阈值（Otsu's方法简化版）
-	int histogram[256] = {0};
-	for (int i = 0; i < plateWidth * plateHeight; i++)
-	{
+	int histogram[256] = { 0 };
+	for (int i = 0; i < width * height; ++i)
 		histogram[plateGray[i]]++;
-	}
-	// 简单计算中间值作为阈值
-	int totalPixels = plateWidth * plateHeight;
-	int sumPixels = 0;
-	for (int i = 0; i < 256; i++)
-	{
-		sumPixels += histogram[i];
-		if (sumPixels > totalPixels / 2)
-		{
-			threshold = i;
-			break;
-		}
-	}
-	// 二值化
-	for (int i = 0; i < plateWidth * plateHeight; i++)
-	{
-		plateBinary[i] = (plateGray[i] > threshold) ? 255 : 0;
-	}
+	int threshold = ComputeOtsuThreshold(histogram, width * height);
 
-	// 6) 调用字符分割主功能
-	CharacterSegmentation(
-		plateBinary,
-		plateWidth,
-		plateHeight,
-		charSegmentImg
-	);
+	BYTE* plateBinary = new BYTE[width * height];
+	for (int i = 0; i < width * height; ++i)
+		plateBinary[i] = (plateGray[i] > threshold) ? 255 : 0;
+
+	BYTE* tmpMorph = new BYTE[width * height];
+	memset(tmpMorph, 0, width * height);
+	dilation(plateBinary, width, height, tmpMorph);
+	erosion(tmpMorph, width, height, plateBinary);
+	erosion(plateBinary, width, height, tmpMorph);
+	dilation(tmpMorph, width, height, plateBinary);
+	delete[] tmpMorph;
+
+	std::vector<int> rowSum(height, 0);
+	for (int y = 0; y < height; ++y)
+	{
+		int sum = 0;
+		for (int x = 0; x < width; ++x)
+			if (plateBinary[y * width + x] > 0)
+				sum++;
+		rowSum[y] = sum;
+	}
+	int rowThreshold = max(width / 25, 3);
+	int top = 0;
+	while (top < height && rowSum[top] < rowThreshold)
+		top++;
+	int bottom = height - 1;
+	while (bottom > top && rowSum[bottom] < rowThreshold)
+		bottom--;
+	if (bottom - top + 1 < height / 3)
+	{
+		top = 0;
+		bottom = height - 1;
+	}
+	int roiHeight = bottom - top + 1;
+	BYTE* cropped = new BYTE[width * roiHeight];
+	for (int y = 0; y < roiHeight; ++y)
+	{
+		memcpy(cropped + y * width, plateBinary + (top + y) * width, width);
+	}
 
 	delete[] plateGray;
 	delete[] plateBinary;
 
-	// 7) 设置显示标志和尺寸
-	charSegmentFlag = 1; // 设置标志以便OnDraw显示
-	charWidth = plateWidth; // 使用车牌宽度作为字符显示宽度
-	charHeight = plateHeight; // 使用车牌高度作为字符显示高度
+	charSegmentImg = new BYTE[width * roiHeight];
+	if (!charSegmentImg)
+	{
+		delete[] cropped;
+		AfxMessageBox(_T("字符分割内存分配失败！"));
+		return false;
+	}
+	memset(charSegmentImg, 0, width * roiHeight);
 
-	// 8) 刷新窗口显示
+	CharacterSegmentation(cropped, width, roiHeight, charSegmentImg);
+	delete[] cropped;
+
+	charSegmentFlag = 1;
+	charWidth = width;
+	charHeight = roiHeight;
+
 	OnInitialUpdate();
 	CRect rc;
 	GetClientRect(&rc);
 	InvalidateRect(&rc);
 
-	AfxMessageBox(_T("字符分割完成！"));
+	if (showMessage)
+		AfxMessageBox(_T("字符分割完成！"));
+	return true;
+}
+
+void CMFCApplication1View::OnCharacterSegmentation()
+{
+	RunCharacterSegmentation(true);
+}
+
+void CMFCApplication1View::OnAutoRecognize()
+{
+	if (!RunColorSegmentation(false))
+		return;
+	if (!RunPlateExtraction(false))
+		return;
+	if (!RunCharacterSegmentation(false))
+		return;
+
+	AfxMessageBox(_T("一键识别完成。"));
 }
 
 void CMFCApplication1View::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
@@ -2300,4 +2387,41 @@ void CMFCApplication1View::OnShapeDetection()
 	// 提示：检查connectedFillImg、blueSegmentImg或redSegmentImg是否存在
 	//      调用ShapeDetection进行形状检测
 	//      设置shapeDetectFlag标志并刷新显示
+}
+int CMFCApplication1View::ComputeOtsuThreshold(const int histogram[256], int totalPixels)
+{
+	if (totalPixels <= 0)
+		return 128;
+
+	double sum = 0.0;
+	for (int i = 0; i < 256; ++i)
+		sum += i * histogram[i];
+
+	double sumB = 0.0;
+	int wB = 0;
+	int wF = 0;
+	double varMax = 0.0;
+	int threshold = 0;
+
+	for (int t = 0; t < 256; ++t)
+	{
+		wB += histogram[t];
+		if (wB == 0)
+			continue;
+		wF = totalPixels - wB;
+		if (wF == 0)
+			break;
+
+		sumB += t * histogram[t];
+		double mB = sumB / wB;
+		double mF = (sum - sumB) / wF;
+		double betweenVar = (double)wB * wF * (mB - mF) * (mB - mF);
+
+		if (betweenVar > varMax)
+		{
+			varMax = betweenVar;
+			threshold = t;
+		}
+	}
+	return threshold;
 }
