@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <cmath>
 
-
 class CMFCApplication1View : public CView
 {
 protected: // 仅从序列化创建

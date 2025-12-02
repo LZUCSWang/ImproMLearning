@@ -9,6 +9,7 @@
 #include <utility>
 #include <algorithm>
 #include <cmath>
+#include <memory>
 
 using namespace std;
 
@@ -129,6 +130,7 @@ CMFCApplication1View::CMFCApplication1View() noexcept
 
 	shapeDetectFlag = 0;
 	shapeDetectImg = 0;
+
 }
 
 CMFCApplication1View::~CMFCApplication1View()
@@ -420,6 +422,7 @@ void CMFCApplication1View::OnDraw(CDC* pDC/*pDC*/)
 			}
 		}
 	}
+
 
 	// ======================== 交通标志识别结果显示 ========================
 	
@@ -1721,6 +1724,7 @@ void CMFCApplication1View::OnPlateExtraction()
 }
 
 // 字符分割 - 投影与连通域结合的清晰化输出
+// 字符分割 - 归一化垂直投影方案
 void CMFCApplication1View::CharacterSegmentation(BYTE* plateImg, int width, int height, BYTE* outImg)
 {
 	if (!plateImg || !outImg || width <= 0 || height <= 0)
@@ -1728,253 +1732,207 @@ void CMFCApplication1View::CharacterSegmentation(BYTE* plateImg, int width, int 
 
 	memset(outImg, 0, width * height);
 
-	struct CharBox
-	{
-		int minX;
-		int maxX;
-		int minY;
-		int maxY;
-		int area;
-	};
-
-	const int size = width * height;
+	struct Segment { int start; int end; int minY; int maxY; };
 
 	std::vector<int> columnSum(width, 0);
 	for (int x = 0; x < width; ++x)
 	{
 		int sum = 0;
 		for (int y = 0; y < height; ++y)
-		{
 			if (plateImg[y * width + x] > 0)
 				sum++;
-		}
 		columnSum[x] = sum;
 	}
 
-	std::vector<int> labels(size, 0);
-	std::vector<int> queue(size, 0);
-	int nextLabel = 1;
-	std::vector<CharBox> allBoxes;
-
-	for (int y = 0; y < height; ++y)
-	{
+	auto detectSegments = [&](int threshold) {
+		std::vector<Segment> segs;
+		bool inRegion = false;
+		int start = 0;
+		int zeroRun = 0;
 		for (int x = 0; x < width; ++x)
 		{
-			int idx = y * width + x;
-			if (plateImg[idx] == 0 || labels[idx] != 0)
-				continue;
-
-			CharBox box{ x, x, y, y, 0 };
-			int head = 0, tail = 0;
-			queue[tail++] = idx;
-			labels[idx] = nextLabel;
-
-			while (head < tail)
+			if (columnSum[x] >= threshold)
 			{
-				int cur = queue[head++];
-				int cy = cur / width;
-				int cx = cur % width;
-				box.area++;
-
-				if (cx < box.minX) box.minX = cx;
-				if (cx > box.maxX) box.maxX = cx;
-				if (cy < box.minY) box.minY = cy;
-				if (cy > box.maxY) box.maxY = cy;
-
-				for (int dy = -1; dy <= 1; ++dy)
+				if (!inRegion)
 				{
-					int ny = cy + dy;
-					if (ny < 0 || ny >= height) continue;
-					for (int dx = -1; dx <= 1; ++dx)
-					{
-						int nx = cx + dx;
-						if (nx < 0 || nx >= width) continue;
-						int nidx = ny * width + nx;
-						if (plateImg[nidx] == 0 || labels[nidx] != 0)
-							continue;
-						labels[nidx] = nextLabel;
-						queue[tail++] = nidx;
-					}
+					inRegion = true;
+					start = max(0, x - 1);
+				}
+				zeroRun = 0;
+			}
+			else if (inRegion)
+			{
+				zeroRun++;
+				if (zeroRun >= 2)
+				{
+					int end = x - zeroRun;
+					if (end >= start)
+						segs.push_back({ start, end, 0, height - 1 });
+					inRegion = false;
 				}
 			}
-
-			allBoxes.push_back(box);
-			nextLabel++;
 		}
-	}
-
-	auto filterByShape = [&](int minW, int maxW, int minH, int maxH, int minArea, int maxArea, double minAspect, double maxAspect)
-	{
-		std::vector<CharBox> filtered;
-		for (const auto& box : allBoxes)
-		{
-			int w = box.maxX - box.minX + 1;
-			int h = box.maxY - box.minY + 1;
-			if (w < minW || w > maxW) continue;
-			if (h < minH || h > maxH) continue;
-			if (box.area < minArea || box.area > maxArea) continue;
-			double aspect = (double)w / (double)h;
-			if (aspect < minAspect || aspect > maxAspect) continue;
-
-			filtered.push_back(box);
-		}
-		return filtered;
+		if (inRegion)
+			segs.push_back({ start, width - 1, 0, height - 1 });
+		return segs;
 	};
 
-	int minAreaBase = max(40, size / 800);
-	int maxAreaBase = max(200, size / 3);
-	int minHeightBase = max(10, height / 3);
-	int maxHeightBase = height;
-	int minWidthBase = max(2, width / 32);
-	int maxWidthBase = max(minWidthBase + 2, width / 4);
+	int threshold = max(2, (int)(height * 0.25));
+	std::vector<Segment> segments = detectSegments(threshold);
+	if (segments.size() < 4)
+		segments = detectSegments(max(2, threshold / 2));
 
-	std::vector<CharBox> regions = filterByShape(
-		minWidthBase, maxWidthBase,
-		minHeightBase, maxHeightBase,
-		minAreaBase, maxAreaBase,
-		0.15, 0.75);
-
-	if (regions.size() < 5)
-	{
-		regions = filterByShape(
-			max(1, minWidthBase / 2), max(width / 3, maxWidthBase),
-			max(6, minHeightBase / 2), height,
-			max(20, minAreaBase / 2), maxAreaBase * 2,
-			0.08, 0.9);
-	}
-
-	if (regions.empty())
+	if (segments.empty())
 	{
 		int expected = 7;
-		int segmentWidth = max(1, width / expected);
+		int segWidth = max(1, width / expected);
 		for (int i = 0; i < expected; ++i)
 		{
-			int sx = i * segmentWidth;
-			int ex = (i == expected - 1) ? (width - 1) : ((i + 1) * segmentWidth - 1);
-			while (sx < ex && columnSum[sx] == 0) sx++;
-			while (ex > sx && columnSum[ex] == 0) ex--;
-			if (ex <= sx)
-				continue;
-			regions.push_back({ sx, ex, 0, height - 1, 0 });
+			int sx = i * segWidth;
+			int ex = (i == expected - 1) ? width - 1 : ((i + 1) * segWidth - 1);
+			segments.push_back({ sx, ex, 0, height - 1 });
 		}
 	}
 
-	if (regions.empty())
+	auto ensureBounds = [&](Segment& seg)
 	{
-		memcpy(outImg, plateImg, width * height);
-		return;
-	}
-
-	auto refineBoxVertically = [&](CharBox& box)
-	{
-		int top = box.minY;
-		int bottom = box.maxY;
-		for (int y = box.minY; y <= box.maxY; ++y)
+		int minY = height - 1;
+		int maxY = 0;
+		bool hasPixel = false;
+		for (int y = 0; y < height; ++y)
 		{
-			bool hasPixel = false;
-			for (int x = box.minX; x <= box.maxX; ++x)
+			for (int x = seg.start; x <= seg.end; ++x)
 			{
 				if (plateImg[y * width + x] > 0)
 				{
+					minY = min(minY, y);
+					maxY = max(maxY, y);
 					hasPixel = true;
-					break;
 				}
 			}
-			if (hasPixel)
-			{
-				top = y;
-				break;
-			}
 		}
-		for (int y = box.maxY; y >= box.minY; --y)
+		if (!hasPixel)
 		{
-			bool hasPixel = false;
-			for (int x = box.minX; x <= box.maxX; ++x)
-			{
-				if (plateImg[y * width + x] > 0)
-				{
-					hasPixel = true;
-					break;
-				}
-			}
-			if (hasPixel)
-			{
-				bottom = y;
-				break;
-			}
+			seg.minY = 0;
+			seg.maxY = height - 1;
 		}
-		if (bottom <= top)
+		else
 		{
-			top = box.minY;
-			bottom = box.maxY;
+			seg.minY = max(0, minY - 1);
+			seg.maxY = min(height - 1, maxY + 1);
 		}
-		box.minY = top;
-		box.maxY = bottom;
 	};
 
-	for (auto& box : regions)
+	int expectedChars = 7;
+	if (width > height * 4.5)
+		expectedChars = 8;
+	expectedChars = min(max(expectedChars, 6), 8);
+
+	auto widestIndex = [&](const std::vector<Segment>& segs) -> int
 	{
-		box.minX = max(0, box.minX - 1);
-		box.maxX = min(width - 1, box.maxX + 1);
-		box.minY = max(0, box.minY - 1);
-		box.maxY = min(height - 1, box.maxY + 1);
-		refineBoxVertically(box);
+		int idx = 0;
+		int widest = -1;
+		for (int i = 0; i < (int)segs.size(); ++i)
+		{
+			int w = segs[i].end - segs[i].start + 1;
+			if (w > widest)
+			{
+				widest = w;
+				idx = i;
+			}
+		}
+		return idx;
+	};
+
+	while ((int)segments.size() < expectedChars)
+	{
+		int idx = widestIndex(segments);
+		Segment seg = segments[idx];
+		int w = seg.end - seg.start + 1;
+		if (w <= 2)
+			break;
+		int mid = seg.start + w / 2;
+		segments[idx].end = mid;
+		segments.insert(segments.begin() + idx + 1, Segment{ mid + 1, seg.end, 0, height - 1 });
 	}
 
-	std::sort(regions.begin(), regions.end(), [](const CharBox& a, const CharBox& b) {
-		return a.minX < b.minX;
+	while ((int)segments.size() > expectedChars)
+	{
+		int mergeIdx = -1;
+		int smallestGap = INT_MAX;
+		for (int i = 0; i < (int)segments.size() - 1; ++i)
+		{
+			int gap = segments[i + 1].start - segments[i].end;
+			if (gap < smallestGap)
+			{
+				smallestGap = gap;
+				mergeIdx = i;
+			}
+		}
+		if (mergeIdx < 0)
+			break;
+		segments[mergeIdx].end = segments[mergeIdx + 1].end;
+		segments.erase(segments.begin() + mergeIdx + 1);
+	}
+
+	for (auto& seg : segments)
+	{
+		seg.start = max(0, seg.start - 1);
+		seg.end = min(width - 1, seg.end + 1);
+		ensureBounds(seg);
+	}
+
+	std::sort(segments.begin(), segments.end(), [](const Segment& a, const Segment& b) {
+		return a.start < b.start;
 	});
 
-	if (regions.size() > 8)
-		regions.resize(8);
+	int gap = max(2, width / 90);
+	if ((int)segments.size() <= 3)
+		gap = max(2, width / 120);
+	int totalGap = gap * ((int)segments.size() - 1);
+	int availableWidth = max(1, width - totalGap);
+	int baseWidth = availableWidth / (int)segments.size();
+	int remainder = availableWidth - baseWidth * (int)segments.size();
+	int destX = max(0, (width - (availableWidth + totalGap)) / 2);
 
-	int spacing = max(2, width / 90);
-	if (regions.size() <= 3)
-		spacing = max(2, width / 120);
-
-	int totalWidth = 0;
-	for (size_t i = 0; i < regions.size(); ++i)
+	for (size_t idx = 0; idx < segments.size(); ++idx)
 	{
-		totalWidth += regions[i].maxX - regions[i].minX + 1;
-		if (i + 1 < regions.size())
-			totalWidth += spacing;
-	}
-	totalWidth = min(totalWidth, width);
-	int writeX = max(0, (width - totalWidth) / 2);
+		const auto& seg = segments[idx];
+		int segWidth = seg.end - seg.start + 1;
+		int segHeight = max(1, seg.maxY - seg.minY + 1);
+		int destWidth = baseWidth + (remainder > 0 ? 1 : 0);
+		if (remainder > 0)
+			remainder--;
+		destWidth = max(destWidth, 1);
 
-	for (size_t idx = 0; idx < regions.size() && writeX < width; ++idx)
-	{
-		const auto& box = regions[idx];
-		int charW = box.maxX - box.minX + 1;
-		int charH = box.maxY - box.minY + 1;
-		int offsetY = max(0, (height - charH) / 2);
-
-		for (int y = 0; y < charH && offsetY + y < height; ++y)
+		for (int dx = 0; dx < destWidth && destX + dx < width; ++dx)
 		{
-			int srcY = box.minY + y;
-			for (int x = 0; x < charW && writeX + x < width; ++x)
+			double srcXf = seg.start + (segWidth - 1) * ((double)dx / max(1, destWidth - 1));
+			int srcX = min(seg.end, max(seg.start, (int)round(srcXf)));
+			for (int dy = 0; dy < height; ++dy)
 			{
-				int srcX = box.minX + x;
+				double srcYf = seg.minY + (segHeight - 1) * ((double)dy / max(1, height - 1));
+				int srcY = min(seg.maxY, max(seg.minY, (int)round(srcYf)));
 				BYTE v = plateImg[srcY * width + srcX];
-				outImg[(offsetY + y) * width + (writeX + x)] = (v > 0) ? 255 : 0;
+				outImg[dy * width + (destX + dx)] = (v > 0) ? 255 : 0;
 			}
 		}
 
-		writeX += charW;
-		if (idx + 1 < regions.size())
+		destX += destWidth;
+		if (idx + 1 < segments.size())
 		{
-			for (int g = 0; g < spacing && writeX < width; ++g, ++writeX)
+			for (int g = 0; g < gap && destX < width; ++g, ++destX)
 			{
 				for (int y = 0; y < height; ++y)
-					outImg[y * width + writeX] = 0;
+					outImg[y * width + destX] = 0;
 			}
 		}
 	}
 
-	for (int y = 0; y < height; ++y)
+	if (destX < width)
 	{
-		for (int x = writeX; x < width; ++x)
-			outImg[y * width + x] = 0;
+		for (int y = 0; y < height; ++y)
+			memset(outImg + y * width + destX, 0, width - destX);
 	}
 }
 
